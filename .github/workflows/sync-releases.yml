@@ -59,12 +59,7 @@ jobs:
         tag: ${{ fromJson(needs.check.outputs.missing_json) }}
 
     steps:
-      # ----------------------------------------------------
-      # ⚠️!! 这就是修正的地方 !!
-      # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
       - name: "2. 同步 Release (Tag: ${{ matrix.tag }})"
-      # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-      # ----------------------------------------------------
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWN_REPO: ${{ github.repository }}
@@ -74,12 +69,22 @@ jobs:
           
           # --- 步骤 2.1: 获取上游 Release 详细信息 ---
           echo "--- Fetching release metadata from $UPSTREAM_REPO ---"
+          # ----------------------------------------------------
+          # ⚠️!! 这就是修正的地方 (title -> name) !!
+          # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
           gh release view $TAG_TO_SYNC --repo $UPSTREAM_REPO \
-            --json title,body,isPrerelease \
+            --json name,body,isPrerelease \
             --template '{{json .}}' > release_details.json
+          # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          # ----------------------------------------------------
 
           # --- 步骤 2.2: 准备 gh 命令的参数 ---
-          TITLE=$(jq -r .title release_details.json)
+          # ----------------------------------------------------
+          # ⚠️!! 这也是修正的地方 (title -> name) !!
+          # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+          TITLE=$(jq -r .name release_details.json)
+          # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          # ----------------------------------------------------
           NOTES_FILE="notes.txt"
           jq -r .body release_details.json > $NOTES_FILE
           IS_PRERELEASE=$(jq .isPrerelease release_details.json)
