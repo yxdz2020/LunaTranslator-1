@@ -15,15 +15,12 @@ jobs:
   # --- 作业 1: 检查有哪些 Releases 缺失 ---
   check:
     runs-on: ubuntu-latest
-    # 定义此作业的输出
     outputs:
-      # 我们将创建一个名为 'missing_json' 的输出，
-      # 它的值来自 'check_tags' 步骤的 'MISSING_JSON' 输出
       missing_json: ${{ steps.check_tags.outputs.MISSING_JSON }}
 
     steps:
       - name: 1. 检查缺失的 Release 标签
-        id: check_tags # 为这个步骤设置一个ID，以便在上面 outputs 中引用
+        id: check_tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWN_REPO: ${{ github.repository }}
@@ -39,41 +36,38 @@ jobs:
 
           if [ ! -s missing_tags.txt ]; then
             echo "✅ Releases are already in sync."
-            # 输出一个空的JSON数组
             echo "MISSING_JSON=[]" >> $GITHUB_OUTPUT
           else
             echo "🔔 Found missing tags:"
             cat missing_tags.txt
-            # 将缺失的标签列表转换成一个 GitHub Actions 能识别的 JSON 数组
             MISSING_JSON=$(jq -R -s -c 'split("\n") | map(select(length > 0))' missing_tags.txt)
             echo "MISSING_JSON=$MISSING_JSON" >> $GITHUB_OUTPUT
           fi
 
   # --- 作业 2: 同步缺失的 Releases ---
   sync:
-    # 只有 "check" 作业成功完成后才运行
     needs: check
-    # 仅当 "check" 作业的输出 'missing_json' 不是空列表 '[]' 时才运行
     if: needs.check.outputs.missing_json != '[]'
 
     runs-on: ubuntu-latest
-    # 权限设置在 'sync' 作业上
     permissions:
       contents: write
 
-    # !! 关键更正：'strategy' 现在在 'jobs' 级别，这是正确的
     strategy:
-      fail-fast: false # 即使一个 tag 同步失败了，也继续尝试同步其他的
+      fail-fast: false
       matrix:
-        # 从 "check" 作业的输出中动态读取标签列表
         tag: ${{ fromJson(needs.check.outputs.missing_json) }}
 
     steps:
-      - name: 2. 同步 Release (Tag: ${{ matrix.tag }})
+      # ----------------------------------------------------
+      # ⚠️!! 这就是修正的地方 !!
+      # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+      - name: "2. 同步 Release (Tag: ${{ matrix.tag }})"
+      # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      # ----------------------------------------------------
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWN_REPO: ${{ github.repository }}
-          # 从 matrix 中获取当前要同步的 tag
           TAG_TO_SYNC: ${{ matrix.tag }}
         run: |
           echo "Syncing release for tag: $TAG_TO_SYNC"
@@ -108,7 +102,6 @@ jobs:
           # --- 步骤 2.4: 下载上游 Release 的所有附件 ---
           echo "--- Downloading assets from $UPSTREAM_REPO ---"
           mkdir -p ./temp_assets
-          # 下载该 tag 的所有附件
           gh release download $TAG_TO_SYNC --repo $UPSTREAM_REPO --dir ./temp_assets
 
           # --- 步骤 2.5: 上传附件到新创建的 Release ---
@@ -116,7 +109,6 @@ jobs:
              echo "No assets found for this release. Sync complete."
           else
              echo "--- Uploading assets to $OWN_REPO ---"
-             # 上传目录中的所有文件
              gh release upload $TAG_TO_SYNC --repo $OWN_REPO --clobber ./temp_assets/*
              echo "✅ Synced release with assets: $TAG_TO_SYNC"
           fi
