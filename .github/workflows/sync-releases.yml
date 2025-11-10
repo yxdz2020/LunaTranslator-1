@@ -70,21 +70,17 @@ jobs:
           # --- 步骤 2.1: 获取上游 Release 详细信息 ---
           echo "--- Fetching release metadata from $UPSTREAM_REPO ---"
           # ----------------------------------------------------
-          # ⚠️!! 这就是修正的地方 (title -> name) !!
+          # ⚠️!! 这就是修正的地方 !!
           # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+          # 删除了多余的 --template '{{json .}}' 
           gh release view $TAG_TO_SYNC --repo $UPSTREAM_REPO \
-            --json name,body,isPrerelease \
-            --template '{{json .}}' > release_details.json
+            --json name,body,isPrerelease > release_details.json
           # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
           # ----------------------------------------------------
 
           # --- 步骤 2.2: 准备 gh 命令的参数 ---
-          # ----------------------------------------------------
-          # ⚠️!! 这也是修正的地方 (title -> name) !!
-          # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+          # (这一步不需要修改, 它会正确读取 release_details.json)
           TITLE=$(jq -r .name release_details.json)
-          # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-          # ----------------------------------------------------
           NOTES_FILE="notes.txt"
           jq -r .body release_details.json > $NOTES_FILE
           IS_PRERELEASE=$(jq .isPrerelease release_details.json)
