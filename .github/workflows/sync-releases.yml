@@ -1,11 +1,7 @@
 name: 🔄 Sync Upstream Releases & Assets (Official GH CLI)
-# 工作流名称：使用官方 GH CLI 同步上游 Releases 及附件
 
 on:
-  # 1. 允许你从 Actions 标签页手动运行此工作流
   workflow_dispatch:
-
-  # 2. 设置定时任务 (每天凌晨3点运行一次 UTC)
   schedule:
     - cron: '0 3 * * *'
 
@@ -16,37 +12,34 @@ env:
 # ----------------------------------------------------
 
 jobs:
-  sync:
+  # --- 作业 1: 检查有哪些 Releases 缺失 ---
+  check:
     runs-on: ubuntu-latest
-    
-    # ----------------------------------------------------
-    # ⚠️ 必须添加! 
-    # 允许 Action 使用 GITHUB_TOKEN 来读取和写入 'contents' (代码, releases, 附件)
-    permissions:
-      contents: write
-    # ----------------------------------------------------
+    # 定义此作业的输出
+    outputs:
+      # 我们将创建一个名为 'missing_json' 的输出，
+      # 它的值来自 'check_tags' 步骤的 'MISSING_JSON' 输出
+      missing_json: ${{ steps.check_tags.outputs.MISSING_JSON }}
 
     steps:
       - name: 1. 检查缺失的 Release 标签
-        id: check_tags
+        id: check_tags # 为这个步骤设置一个ID，以便在上面 outputs 中引用
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWN_REPO: ${{ github.repository }}
         run: |
           echo "Fetching releases from upstream: $UPSTREAM_REPO"
-          # 获取上游所有 release 标签 (最多100个)
           gh release list --repo $UPSTREAM_REPO --limit 100 --json tagName --jq '.[] | .tagName' > upstream_tags.txt
           
           echo "Fetching releases from own repo: $OWN_REPO"
-          # 获取当前仓库所有 release 标签 (最多100个)
           gh release list --repo $OWN_REPO --limit 100 --json tagName --jq '.[] | .tagName' > own_tags.txt
 
           echo "Comparing tags..."
-          # 找出在上游但不在当前仓库的标签
           comm -23 <(sort upstream_tags.txt) <(sort own_tags.txt) > missing_tags.txt
 
           if [ ! -s missing_tags.txt ]; then
             echo "✅ Releases are already in sync."
+            # 输出一个空的JSON数组
             echo "MISSING_JSON=[]" >> $GITHUB_OUTPUT
           else
             echo "🔔 Found missing tags:"
@@ -56,23 +49,38 @@ jobs:
             echo "MISSING_JSON=$MISSING_JSON" >> $GITHUB_OUTPUT
           fi
 
-      - name: 2. 同步缺失的 Release (包含附件)
-        # 仅当 'check_tags' 步骤找到了缺失标签时才运行
-        if: steps.check_tags.outputs.MISSING_JSON != '[]'
-        # 使用 matrix 策略，为每个缺失的标签启动一个并行的步骤
-        strategy:
-          matrix:
-            # fromJson 会解析上一步输出的 JSON 数组 '["tag1","tag2"]'
-            tag: ${{ fromJson(steps.check_tags.outputs.MISSING_JSON) }}
+  # --- 作业 2: 同步缺失的 Releases ---
+  sync:
+    # 只有 "check" 作业成功完成后才运行
+    needs: check
+    # 仅当 "check" 作业的输出 'missing_json' 不是空列表 '[]' 时才运行
+    if: needs.check.outputs.missing_json != '[]'
+
+    runs-on: ubuntu-latest
+    # 权限设置在 'sync' 作业上
+    permissions:
+      contents: write
+
+    # !! 关键更正：'strategy' 现在在 'jobs' 级别，这是正确的
+    strategy:
+      fail-fast: false # 即使一个 tag 同步失败了，也继续尝试同步其他的
+      matrix:
+        # 从 "check" 作业的输出中动态读取标签列表
+        tag: ${{ fromJson(needs.check.outputs.missing_json) }}
+
+    steps:
+      - name: 2. 同步 Release (Tag: ${{ matrix.tag }})
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWN_REPO: ${{ github.repository }}
+          # 从 matrix 中获取当前要同步的 tag
+          TAG_TO_SYNC: ${{ matrix.tag }}
         run: |
-          echo "Syncing release for tag: ${{ matrix.tag }}"
+          echo "Syncing release for tag: $TAG_TO_SYNC"
           
-          # --- 步骤 2.1: 获取上游 Release 详细信息 (标题, 说明, 是否预发布) ---
+          # --- 步骤 2.1: 获取上游 Release 详细信息 ---
           echo "--- Fetching release metadata from $UPSTREAM_REPO ---"
-          gh release view ${{ matrix.tag }} --repo $UPSTREAM_REPO \
+          gh release view $TAG_TO_SYNC --repo $UPSTREAM_REPO \
             --json title,body,isPrerelease \
             --template '{{json .}}' > release_details.json
 
@@ -89,29 +97,26 @@ jobs:
 
           # --- 步骤 2.3: 在当前仓库创建 Release (仅元数据) ---
           echo "--- Creating release metadata in $OWN_REPO ---"
-          gh release create ${{ matrix.tag }} \
+          gh release create $TAG_TO_SYNC \
             --repo $OWN_REPO \
             --title "$TITLE" \
             --notes-file $NOTES_FILE \
             $EXTRA_ARGS
 
-          echo "--- Created metadata for release: ${{ matrix.tag }}"
+          echo "--- Created metadata for release: $TAG_TO_SYNC"
 
           # --- 步骤 2.4: 下载上游 Release 的所有附件 ---
           echo "--- Downloading assets from $UPSTREAM_REPO ---"
-          # 创建一个临时目录来存放附件
           mkdir -p ./temp_assets
-          # 下载该 tag 的所有附件到
-          gh release download ${{ matrix.tag }} --repo $UPSTREAM_REPO --dir ./temp_assets
+          # 下载该 tag 的所有附件
+          gh release download $TAG_TO_SYNC --repo $UPSTREAM_REPO --dir ./temp_assets
 
           # --- 步骤 2.5: 上传附件到新创建的 Release ---
-          # 检查 temp_assets 目录是否为空
           if [ -z "$(ls -A ./temp_assets)" ]; then
              echo "No assets found for this release. Sync complete."
           else
              echo "--- Uploading assets to $OWN_REPO ---"
-             # 使用通配符上传目录中的所有文件
-             # 'clobber' 选项意味着如果文件已存在（不太可能），则覆盖它
-             gh release upload ${{ matrix.tag }} --repo $OWN_REPO --clobber ./temp_assets/*
-             echo "✅ Synced release with assets: ${{ matrix.tag }}"
+             # 上传目录中的所有文件
+             gh release upload $TAG_TO_SYNC --repo $OWN_REPO --clobber ./temp_assets/*
+             echo "✅ Synced release with assets: $TAG_TO_SYNC"
           fi
