@@ -16,118 +16,128 @@ jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
-      missing_json: ${{ steps.check_tags.outputs.MISSING_JSON }}
+      # ⚠️ 更改：不再输出JSON，而是输出一个多行字符串
+      missing_tags: ${{ steps.check_tags.outputs.MISSING_TAGS }}
 
     steps:
-      - name: 1. 检查缺失的 Release 标签
+      - name: 1. 检查缺失的 Release 标签 (按顺序)
         id: check_tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWN_REPO: ${{ github.repository }}
         run: |
           echo "Fetching releases from upstream: $UPSTREAM_REPO"
-          gh release list --repo $UPSTREAM_REPO --limit 100 --json tagName --jq '.[] | .tagName' > upstream_tags.txt
+          # ⚠️ 更改：--limit 100 保证获取足够多的历史记录
+          gh release list --repo $UPSTREAM_REPO --limit 100 --json tagName --jq '.[] | .tagName' > upstream_tags_raw.txt
           
           echo "Fetching releases from own repo: $OWN_REPO"
           gh release list --repo $OWN_REPO --limit 100 --json tagName --jq '.[] | .tagName' > own_tags.txt
 
+          # ⚠️ 更改：'sort -V' 会按版本号正确排序 (例如 v1.10 会在 v1.9 之后)
+          sort -V upstream_tags_raw.txt > upstream_tags.txt
+
           echo "Comparing tags..."
-          comm -23 <(sort upstream_tags.txt) <(sort own_tags.txt) > missing_tags.txt
+          # comm 会输出只在上游、且已排序的列表 (从旧到新)
+          comm -23 upstream_tags.txt <(sort -V own_tags.txt) > missing_tags.txt
 
           if [ ! -s missing_tags.txt ]; then
             echo "✅ Releases are already in sync."
-            echo "MISSING_JSON=[]" >> $GITHUB_OUTPUT
+            echo "MISSING_TAGS=''" >> $GITHUB_OUTPUT
           else
-            echo "🔔 Found missing tags:"
+            echo "🔔 Found missing tags (oldest to newest):"
             cat missing_tags.txt
-            MISSING_JSON=$(jq -R -s -c 'split("\n") | map(select(length > 0))' missing_tags.txt)
-            echo "MISSING_JSON=$MISSING_JSON" >> $GITHUB_OUTPUT
+            # 使用Heredoc格式安全地输出多行字符串
+            {
+              echo 'MISSING_TAGS<<EOF'
+              cat missing_tags.txt
+              echo 'EOF'
+            } >> $GITHUB_OUTPUT
           fi
 
   # --- 作业 2: 同步缺失的 Releases ---
   sync:
     needs: check
-    if: needs.check.outputs.missing_json != '[]'
+    # ⚠️ 更改：检查 'missing_tags' 是否为空
+    if: needs.check.outputs.missing_tags != ''
 
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
-    strategy:
-      fail-fast: false
-      matrix:
-        tag: ${{ fromJson(needs.check.outputs.missing_json) }}
-
+    # ⚠️ 关键更改：删除了 'strategy: matrix'
+    
     steps:
-      - name: "2. 同步 Release (Tag: ${{ matrix.tag }})"
+      # ⚠️ 关键更改：现在只有一个 'step'，它内部包含一个循环
+      - name: "2. 循环同步 Release (从旧到新)"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWN_REPO: ${{ github.repository }}
-          TAG_TO_SYNC: ${{ matrix.tag }}
+          # 接收来自 'check' 作业的整个多行字符串
+          TAG_LIST: ${{ needs.check.outputs.missing_tags }}
         run: |
-          echo "Syncing release for tag: $TAG_TO_SYNC"
-          
-          # --- 步骤 2.1: 获取上游 Release 详细信息 ---
-          echo "--- Fetching release metadata from $UPSTREAM_REPO ---"
-          # ----------------------------------------------------
-          # ⚠️!! 这就是修正的地方 !!
-          # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
-          # 添加 'targetCommitish' 来获取上游的 commit SHA
-          gh release view $TAG_TO_SYNC --repo $UPSTREAM_REPO \
-            --json name,body,isPrerelease,targetCommitish > release_details.json
-          # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-          # ----------------------------------------------------
+          # 逐行读取 TAG_LIST，这会保持 'check' 作业中排序的顺序
+          echo "$TAG_LIST" | while read TAG_TO_SYNC; do
+            # 如果读到空行则跳过
+            if [ -z "$TAG_TO_SYNC" ]; then
+              continue
+            fi
 
-          # --- 步骤 2.2: 准备 gh 命令的参数 ---
-          TITLE=$(jq -r .name release_details.json)
-          NOTES_FILE="notes.txt"
-          jq -r .body release_details.json > $NOTES_FILE
-          
-          # 添加 "Synced from" 信息
-          echo -e "\n\n---\nSynced from https://github.com/$UPSTREAM_REPO" >> $NOTES_FILE
+            echo "================================================="
+            echo "Syncing release for tag: $TAG_TO_SYNC"
+            
+            # --- 步骤 2.1: 获取上游 Release 详细信息 ---
+            echo "--- Fetching release metadata from $UPSTREAM_REPO ---"
+            gh release view $TAG_TO_SYNC --repo $UPSTREAM_REPO \
+              --json name,body,isPrerelease,targetCommitish > release_details.json
 
-          IS_PRERELEASE=$(jq .isPrerelease release_details.json)
-          
-          # ----------------------------------------------------
-          # ⚠️!! 这也是修正的地方 !!
-          # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
-          # 获取上游的 commit SHA
-          TARGET_SHA=$(jq -r .targetCommitish release_details.json)
-          # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-          # ----------------------------------------------------
-          
-          EXTRA_ARGS=""
-          if [[ "$IS_PRERELEASE" == "true" ]]; then
-            EXTRA_ARGS="--prerelease"
-          fi
+            # --- 步骤 2.2: 准备 gh 命令的参数 ---
+            TITLE=$(jq -r .name release_details.json)
+            NOTES_FILE="notes.txt"
+            jq -r .body release_details.json > $NOTES_FILE
+            
+            # ----------------------------------------------------
+            # ⚠️!! 这就是修正的地方 (黑线) !!
+            # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+            # 删除了 '---'，只保留换行和 "Synced from"
+            echo -e "\n\nSynced from https://github.com/$UPSTREAM_REPO" >> $NOTES_FILE
+            # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            # ----------------------------------------------------
 
-          # --- 步骤 2.3: 在当前仓库创建 Release (仅元数据) ---
-          echo "--- Creating release metadata in $OWN_REPO ---"
-          # ----------------------------------------------------
-          # ⚠️!! 这也是修正的地方 !!
-          # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
-          # 使用 --target $TARGET_SHA 来确保 tag 指向正确的 commit
-          gh release create $TAG_TO_SYNC \
-            --repo $OWN_REPO \
-            --title "$TITLE" \
-            --notes-file $NOTES_FILE \
-            --target $TARGET_SHA \
-            $EXTRA_ARGS
-          # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-          # ----------------------------------------------------
+            IS_PRERELEASE=$(jq .isPrerelease release_details.json)
+            TARGET_SHA=$(jq -r .targetCommitish release_details.json)
+            
+            EXTRA_ARGS=""
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              EXTRA_ARGS="--prerelease"
+            fi
 
-          echo "--- Created metadata for release: $TAG_TO_SYNC"
+            # --- 步骤 2.3: 在当前仓库创建 Release (仅元数据) ---
+            echo "--- Creating release metadata in $OWN_REPO ---"
+            gh release create $TAG_TO_SYNC \
+              --repo $OWN_REPO \
+              --title "$TITLE" \
+              --notes-file $NOTES_FILE \
+              --target $TARGET_SHA \
+              $EXTRA_ARGS
 
-          # --- 步骤 2.4: 下载上游 Release 的所有附件 ---
-          echo "--- Downloading assets from $UPSTREAM_REPO ---"
-          mkdir -p ./temp_assets
-          gh release download $TAG_TO_SYNC --repo $UPSTREAM_REPO --dir ./temp_assets
+            echo "--- Created metadata for release: $TAG_TO_SYNC"
 
-          # --- 步骤 2.5: 上传附件到新创建的 Release ---
-          if [ -z "$(ls -A ./temp_assets)" ]; then
-             echo "No assets found for this release. Sync complete."
-          else
-             echo "--- Uploading assets to $OWN_REPO ---"
-             gh release upload $TAG_TO_SYNC --repo $OWN_REPO --clobber ./temp_assets/*
-             echo "✅ Synced release with assets: $TAG_TO_SYNC"
-          fi
+            # --- 步骤 2.4: 下载上游 Release 的所有附件 ---
+            echo "--- Downloading assets from $UPSTREAM_REPO ---"
+            mkdir -p ./temp_assets
+            gh release download $TAG_TO_SYNC --repo $UPSTREAM_REPO --dir ./temp_assets
+
+            # --- 步骤 2.5: 上传附件到新创建的 Release ---
+            if [ -z "$(ls -A ./temp_assets)" ]; then
+               echo "No assets found for this release."
+            else
+               echo "--- Uploading assets to $OWN_REPO ---"
+               gh release upload $TAG_TO_SYNC --repo $OWN_REPO --clobber ./temp_assets/*
+               echo "✅ Synced release with assets: $TAG_TO_SYNC"
+            fi
+            
+            # 清理临时文件和目录，为下一个循环做准备
+            rm -f release_details.json notes.txt
+            rm -rf ./temp_assets
+
+          done # 循环结束
