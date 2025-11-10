@@ -72,18 +72,29 @@ jobs:
           # ----------------------------------------------------
           # ⚠️!! 这就是修正的地方 !!
           # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
-          # 删除了多余的 --template '{{json .}}' 
+          # 添加 'targetCommitish' 来获取上游的 commit SHA
           gh release view $TAG_TO_SYNC --repo $UPSTREAM_REPO \
-            --json name,body,isPrerelease > release_details.json
+            --json name,body,isPrerelease,targetCommitish > release_details.json
           # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
           # ----------------------------------------------------
 
           # --- 步骤 2.2: 准备 gh 命令的参数 ---
-          # (这一步不需要修改, 它会正确读取 release_details.json)
           TITLE=$(jq -r .name release_details.json)
           NOTES_FILE="notes.txt"
           jq -r .body release_details.json > $NOTES_FILE
+          
+          # 添加 "Synced from" 信息
+          echo -e "\n\n---\nSynced from https://github.com/$UPSTREAM_REPO" >> $NOTES_FILE
+
           IS_PRERELEASE=$(jq .isPrerelease release_details.json)
+          
+          # ----------------------------------------------------
+          # ⚠️!! 这也是修正的地方 !!
+          # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+          # 获取上游的 commit SHA
+          TARGET_SHA=$(jq -r .targetCommitish release_details.json)
+          # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          # ----------------------------------------------------
           
           EXTRA_ARGS=""
           if [[ "$IS_PRERELEASE" == "true" ]]; then
@@ -92,11 +103,18 @@ jobs:
 
           # --- 步骤 2.3: 在当前仓库创建 Release (仅元数据) ---
           echo "--- Creating release metadata in $OWN_REPO ---"
+          # ----------------------------------------------------
+          # ⚠️!! 这也是修正的地方 !!
+          # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+          # 使用 --target $TARGET_SHA 来确保 tag 指向正确的 commit
           gh release create $TAG_TO_SYNC \
             --repo $OWN_REPO \
             --title "$TITLE" \
             --notes-file $NOTES_FILE \
+            --target $TARGET_SHA \
             $EXTRA_ARGS
+          # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          # ----------------------------------------------------
 
           echo "--- Created metadata for release: $TAG_TO_SYNC"
 
