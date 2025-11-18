@@ -1,4 +1,4 @@
-name: Delete All Releases - API Only
+name: Delete All Releases - Fixed
 
 on:
   workflow_dispatch:
@@ -17,74 +17,50 @@ jobs:
       contents: write
     
     steps:
-    - name: Check confirmation
-      run: |
-        echo "✅ 确认字符串匹配，开始删除所有 releases..."
-        echo "⚠️  这是一个破坏性操作，无法撤销！"
-    
     - name: Install jq
       run: sudo apt update && sudo apt install jq curl -y
     
-    - name: Delete all releases via API
+    - name: Delete all releases
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         echo "🚨 开始删除所有 releases..."
-        
-        page=1
         total_deleted=0
         
-        while true; do
-          echo "📄 获取第 $page 页 releases..."
+        # 一次性获取所有 releases
+        echo "📋 获取所有 releases 列表..."
+        response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100")
+        
+        # 提取 releases 信息到数组
+        mapfile -t releases < <(echo "$response" | jq -r '.[] | "\(.id)|\(.tag_name)"')
+        
+        if [ ${#releases[@]} -eq 0 ]; then
+          echo "ℹ️ 没有找到任何 releases"
+          exit 0
+        fi
+        
+        echo "🗑️ 找到 ${#releases[@]} 个 releases，开始删除..."
+        
+        # 删除每个 release
+        for release_info in "${releases[@]}"; do
+          IFS='|' read -r release_id tag_name <<< "$release_info"
           
-          # 获取 releases 列表
-          response=$(curl -s -w "%{http_code}" -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases?page=$page&per_page=100")
-          
-          http_code=$(echo "$response" | tail -n1)
-          json_response=$(echo "$response" | head -n -1)
-          
-          # 检查响应
-          if [ "$http_code" != "200" ]; then
-            echo "❌ API 请求失败，HTTP 代码: $http_code"
-            echo "响应: $json_response"
-            break
-          fi
-          
-          # 检查是否还有数据
-          count=$(echo "$json_response" | jq length)
-          if [ "$count" -eq 0 ]; then
-            echo "✅ 所有 releases 已处理完成"
-            break
-          fi
-          
-          echo "📋 找到 $count 个 releases"
-          
-          # 处理当前页的 releases
-          echo "$json_response" | jq -r '.[] | "\(.id)|\(.tag_name)"' | while IFS='|' read -r release_id tag_name; do
-            if [ -n "$release_id" ] && [ -n "$tag_name" ]; then
-              echo "🗑️ 正在删除: $tag_name (ID: $release_id)"
-              
-              # 删除 release
-              delete_response=$(curl -s -w "%{http_code}" -X DELETE \
-                -H "Authorization: token $GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${{ github.repository }}/releases/$release_id")
-              
-              delete_http_code=$(echo "$delete_response" | tail -n1)
-              
-              if [ "$delete_http_code" = "204" ]; then
-                echo "✅ 成功删除: $tag_name"
-                total_deleted=$((total_deleted + 1))
-              else
-                echo "❌ 删除失败: $tag_name (HTTP: $delete_http_code)"
-              fi
+          if [ -n "$release_id" ] && [ -n "$tag_name" ]; then
+            echo "正在删除: $tag_name"
+            
+            delete_code=$(curl -s -w "%{http_code}" -X DELETE \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/$release_id" -o /dev/null)
+            
+            if [ "$delete_code" = "204" ]; then
+              echo "✅ 成功删除: $tag_name"
+              total_deleted=$((total_deleted + 1))
+            else
+              echo "❌ 删除失败: $tag_name (HTTP: $delete_code)"
             fi
-          done
-          
-          ((page++))
-          sleep 1  # 避免 API 速率限制
+          fi
         done
         
         echo "🎉 删除完成！总共删除了 $total_deleted 个 releases"
