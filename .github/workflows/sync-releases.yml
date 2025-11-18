@@ -1,119 +1,54 @@
-name: Sync Upstream Releases
+name: Sync Releases via API
 
 on:
   schedule:
-    # 每天凌晨2点检查同步（UTC时间）
     - cron: '0 2 * * *'
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
     inputs:
       upstream_repo:
-        description: 'HIllya51/LunaTranslator'
+        description: '上游仓库'
         required: true
-        default: 'yxdz2020/LunaTranslator-1'
-
-env:
-  UPSTREAM_REPO: ${{ github.event.inputs.upstream_repo || 'original/example-repo' }}
-  TARGET_REPO: ${{ github.repository }}
 
 jobs:
-  sync-releases:
+  sync-releases-api:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout current repository
-        uses: actions/checkout@v4
-
-      - name: Setup GitHub CLI
-        uses: actions/setup-go@v4
+      - name: Sync releases
+        uses: actions/github-script@v7
         with:
-          go-version: '1.20'
-
-      - name: Install GitHub CLI
-        run: |
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt update
-          sudo apt install gh
-
-      - name: Authenticate GitHub CLI
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-
-      - name: Get upstream releases
-        id: upstream_releases
-        run: |
-          # 获取上游仓库的 releases
-          UPSTREAM_RELEASES=$(gh release list --repo $UPSTREAM_REPO --limit 10 --json tagName,isDraft,isPrerelease | jq -r '.[] | select(.isDraft == false) | select(.isPrerelease == false) | .tagName')
-          echo "upstream_releases<<EOF" >> $GITHUB_OUTPUT
-          echo "$UPSTREAM_RELEASES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Get current releases
-        id: current_releases
-        run: |
-          # 获取当前仓库的 releases
-          CURRENT_RELEASES=$(gh release list --repo $TARGET_REPO --limit 10 --json tagName | jq -r '.[].tagName')
-          echo "current_releases<<EOF" >> $GITHUB_OUTPUT
-          echo "$CURRENT_RELEASES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Find missing releases
-        id: missing_releases
-        run: |
-          # 比较并找出缺失的 releases
-          UPSTREAM_RELEASES="${{ steps.upstream_releases.outputs.upstream_releases }}"
-          CURRENT_RELEASES="${{ steps.current_releases.outputs.current_releases }}"
-          
-          MISSING_RELEASES=""
-          for release in $UPSTREAM_RELEASES; do
-            if ! echo "$CURRENT_RELEASES" | grep -q "^$release$"; then
-              MISSING_RELEASES="$MISSING_RELEASES $release"
-            fi
-          done
-          
-          echo "missing_releases<<EOF" >> $GITHUB_OUTPUT
-          echo "$MISSING_RELEASES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Sync missing releases
-        if: steps.missing_releases.outputs.missing_releases != ''
-        run: |
-          MISSING_RELEASES="${{ steps.missing_releases.outputs.missing_releases }}"
-          for release in $MISSING_RELEASES; do
-            echo "Syncing release: $release"
+          script: |
+            const { upstream_repo } = process.env;
+            const [upstreamOwner, upstreamRepo] = upstream_repo.split('/');
             
-            # 下载 release assets
-            gh release download $release --repo $UPSTREAM_REPO --dir ./temp_assets
+            // 获取上游 releases
+            const upstreamReleases = await github.rest.repos.listReleases({
+              owner: upstreamOwner,
+              repo: upstreamRepo,
+            });
             
-            # 创建 release notes
-            RELEASE_NOTES=$(gh release view $release --repo $UPSTREAM_REPO --json body --jq '.body')
+            // 获取当前仓库 releases
+            const currentReleases = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
             
-            # 创建新的 release
-            if [ -n "$(ls -A ./temp_assets 2>/dev/null)" ]; then
-              gh release create $release \
-                --repo $TARGET_REPO \
-                --title "$release" \
-                --notes "$RELEASE_NOTES" \
-                ./temp_assets/*
-            else
-              gh release create $release \
-                --repo $TARGET_REPO \
-                --title "$release" \
-                --notes "$RELEASE_NOTES"
-            fi
+            const currentReleaseTags = new Set(currentReleases.data.map(r => r.tag_name));
             
-            # 清理临时文件
-            rm -rf ./temp_assets
-          done
-
-      - name: Create summary
-        run: |
-          MISSING_RELEASES="${{ steps.missing_releases.outputs.missing_releases }}"
-          if [ -n "$MISSING_RELEASES" ]; then
-            echo "## 🎉 同步完成" >> $GITHUB_STEP_SUMMARY
-            echo "成功同步以下 releases：" >> $GITHUB_STEP_SUMMARY
-            for release in $MISSING_RELEASES; do
-              echo "- $release" >> $GITHUB_STEP_SUMMARY
-            done
-          else
-            echo "## ✅ 无需同步" >> $GITHUB_STEP_SUMMARY
-            echo "所有 releases 都已是最新版本" >> $GITHUB_STEP_SUMMARY
-          fi
+            // 同步缺失的 releases
+            for (const release of upstreamReleases.data) {
+              if (!release.draft && !release.prerelease && !currentReleaseTags.has(release.tag_name)) {
+                console.log(`Creating release: ${release.tag_name}`);
+                
+                await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: release.tag_name,
+                  name: release.name || release.tag_name,
+                  body: release.body || '',
+                  draft: false,
+                  prerelease: release.prerelease
+                });
+              }
+            }
+        env:
+          upstream_repo: ${{ github.event.inputs.upstream_repo }}
