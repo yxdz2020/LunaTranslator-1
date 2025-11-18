@@ -15,118 +15,105 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          node-version: '18'
+          python-version: '3.x'
 
       - name: Install dependencies
-        run: npm install @octokit/rest
+        run: |
+          pip install requests PyGithub
 
-      - name: Sync releases with assets
+      - name: Sync releases with Python
         env:
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          node << 'EOF'
-          const { UPSTREAM_REPO, GITHUB_TOKEN } = process.env;
-          const [upstreamOwner, upstreamRepo] = UPSTREAM_REPO.split('/');
-          const { Octokit } = require('@octokit/rest');
-          const fs = require('fs');
-          const path = require('path');
+          python3 << 'EOF'
+          import os
+          import requests
+          from github import Github
+          import tempfile
+          import shutil
 
-          const octokit = new Octokit({ auth: GITHUB_TOKEN });
-          const [currentOwner, currentRepo] = process.env.GITHUB_REPOSITORY.split('/');
+          # 初始化 GitHub API
+          g = Github(os.environ['GITHUB_TOKEN'])
+          upstream_repo = os.environ['UPSTREAM_REPO']
+          current_repo_name = os.environ['GITHUB_REPOSITORY']
           
-          async function downloadFile(url, filePath) {
-            const response = await fetch(url);
-            if (!response.ok) throw new Error('Download failed');
-            const arrayBuffer = await response.arrayBuffer();
-            fs.writeFileSync(filePath, Buffer.from(arrayBuffer));
-          }
+          # 获取仓库对象
+          upstream = g.get_repo(upstream_repo)
+          current_repo = g.get_repo(current_repo_name)
           
-          async function syncReleases() {
-            // 获取上游 releases
-            const upstreamReleases = await octokit.repos.listReleases({
-              owner: upstreamOwner,
-              repo: upstreamRepo,
-            });
-            
-            // 获取当前仓库 releases
-            const currentReleases = await octokit.repos.listReleases({
-              owner: currentOwner,
-              repo: currentRepo,
-            });
-            
-            const currentReleaseTags = new Set(currentReleases.data.map(r => r.tag_name));
-            
-            // 创建临时目录
-            const tempDir = './temp_assets';
-            if (!fs.existsSync(tempDir)) {
-              fs.mkdirSync(tempDir, { recursive: true });
-            }
-            
-            for (const release of upstreamReleases.data) {
-              if (!release.draft && !release.prerelease && !currentReleaseTags.has(release.tag_name)) {
-                console.log('Syncing release:', release.tag_name);
-                
-                // 创建 release
-                const newRelease = await octokit.repos.createRelease({
-                  owner: currentOwner,
-                  repo: currentRepo,
-                  tag_name: release.tag_name,
-                  name: release.name || release.tag_name,
-                  body: release.body || '',
-                  draft: false,
-                  prerelease: release.prerelease
-                });
-                
-                // 同步附件
-                if (release.assets && release.assets.length > 0) {
-                  console.log('Syncing', release.assets.length, 'assets for:', release.tag_name);
-                  
-                  for (const asset of release.assets) {
-                    try {
-                      const tempFilePath = path.join(tempDir, asset.name);
-                      console.log('Downloading:', asset.name);
-                      
-                      // 下载附件
-                      await downloadFile(asset.browser_download_url, tempFilePath);
-                      
-                      // 上传附件
-                      const fileContent = fs.readFileSync(tempFilePath);
-                      await octokit.repos.uploadReleaseAsset({
-                        owner: currentOwner,
-                        repo: currentRepo,
-                        release_id: newRelease.data.id,
-                        name: asset.name,
-                        data: fileContent,
-                      });
-                      
-                      console.log('Uploaded:', asset.name);
-                      fs.unlinkSync(tempFilePath);
-                      
-                    } catch (error) {
-                      console.error('Failed to sync asset:', asset.name, error.message);
-                    }
-                  }
-                }
-                
-                console.log('Successfully synced release:', release.tag_name);
-              }
-            }
-            
-            // 清理临时目录
-            if (fs.existsSync(tempDir)) {
-              fs.rmSync(tempDir, { recursive: true });
-            }
-          }
+          # 获取上游 releases
+          upstream_releases = upstream.get_releases()
           
-          syncReleases().catch(console.error);
+          # 获取当前 releases
+          current_releases = current_repo.get_releases()
+          current_tags = {release.tag_name for release in current_releases}
+          
+          # 创建临时目录
+          temp_dir = tempfile.mkdtemp()
+          
+          try:
+              synced_count = 0
+              
+              for release in upstream_releases:
+                  if not release.draft and not release.prerelease and release.tag_name not in current_tags:
+                      print(f"Syncing release: {release.tag_name}")
+                      
+                      try:
+                          # 创建新 release
+                          new_release = current_repo.create_git_release(
+                              tag=release.tag_name,
+                              name=release.title or release.tag_name,
+                              message=release.body or "",
+                              draft=False,
+                              prerelease=release.prerelease
+                          )
+                          
+                          # 同步附件
+                          assets = release.get_assets()
+                          if assets.totalCount > 0:
+                              print(f"Syncing {assets.totalCount} assets for {release.tag_name}")
+                              
+                              for asset in assets:
+                                  try:
+                                      # 下载附件
+                                      print(f"Downloading: {asset.name}")
+                                      response = requests.get(asset.browser_download_url, headers={
+                                          'Authorization': f'token {os.environ["GITHUB_TOKEN"]}'
+                                      })
+                                      response.raise_for_status()
+                                      
+                                      # 保存到临时文件
+                                      temp_file = os.path.join(temp_dir, asset.name)
+                                      with open(temp_file, 'wb') as f:
+                                          f.write(response.content)
+                                      
+                                      # 上传附件
+                                      with open(temp_file, 'rb') as f:
+                                          new_release.upload_asset(
+                                              name=asset.name,
+                                              content_type=asset.content_type or 'application/octet-stream',
+                                              asset=f
+                                          )
+                                      
+                                      print(f"Uploaded: {asset.name}")
+                                      
+                                  except Exception as e:
+                                      print(f"Failed to sync asset {asset.name}: {e}")
+                          
+                          print(f"Successfully synced release: {release.tag_name}")
+                          synced_count += 1
+                          
+                      except Exception as e:
+                          print(f"Failed to sync release {release.tag_name}: {e}")
+              
+              print(f"Sync completed. {synced_count} releases synced.")
+              
+          finally:
+              # 清理临时目录
+              if os.path.exists(temp_dir):
+                  shutil.rmtree(temp_dir)
           EOF
-
-      - name: Cleanup
-        run: |
-          if [ -d "./temp_assets" ]; then
-            rm -rf ./temp_assets
-          fi
