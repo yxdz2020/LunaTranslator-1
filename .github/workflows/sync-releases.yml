@@ -20,22 +20,23 @@ jobs:
         with:
           node-version: '18'
 
+      - name: Install dependencies
+        run: npm install @octokit/rest
+
       - name: Sync releases with assets
         env:
           UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node -e "
+        run: |
+          node << 'EOF'
           const { UPSTREAM_REPO, GITHUB_TOKEN } = process.env;
           const [upstreamOwner, upstreamRepo] = UPSTREAM_REPO.split('/');
           const { Octokit } = require('@octokit/rest');
           const fs = require('fs');
           const path = require('path');
-          const https = require('https');
-          const { promisify } = require('util');
-          
+
           const octokit = new Octokit({ auth: GITHUB_TOKEN });
-          const stream = require('stream');
-          const pipeline = promisify(stream.pipeline);
+          const [currentOwner, currentRepo] = process.env.GITHUB_REPOSITORY.split('/');
           
           async function downloadFile(url, filePath) {
             const response = await fetch(url);
@@ -53,8 +54,8 @@ jobs:
             
             // 获取当前仓库 releases
             const currentReleases = await octokit.repos.listReleases({
-              owner: '${{ github.repository_owner }}',
-              repo: '${{ github.event.repository.name }}',
+              owner: currentOwner,
+              repo: currentRepo,
             });
             
             const currentReleaseTags = new Set(currentReleases.data.map(r => r.tag_name));
@@ -62,7 +63,7 @@ jobs:
             // 创建临时目录
             const tempDir = './temp_assets';
             if (!fs.existsSync(tempDir)) {
-              fs.mkdirSync(tempDir);
+              fs.mkdirSync(tempDir, { recursive: true });
             }
             
             for (const release of upstreamReleases.data) {
@@ -71,8 +72,8 @@ jobs:
                 
                 // 创建 release
                 const newRelease = await octokit.repos.createRelease({
-                  owner: '${{ github.repository_owner }}',
-                  repo: '${{ github.event.repository.name }}',
+                  owner: currentOwner,
+                  repo: currentRepo,
                   tag_name: release.tag_name,
                   name: release.name || release.tag_name,
                   body: release.body || '',
@@ -82,34 +83,29 @@ jobs:
                 
                 // 同步附件
                 if (release.assets && release.assets.length > 0) {
-                  console.log('Syncing assets for:', release.tag_name);
+                  console.log('Syncing', release.assets.length, 'assets for:', release.tag_name);
                   
                   for (const asset of release.assets) {
                     try {
                       const tempFilePath = path.join(tempDir, asset.name);
+                      console.log('Downloading:', asset.name);
                       
                       // 下载附件
-                      console.log('Downloading:', asset.name);
                       await downloadFile(asset.browser_download_url, tempFilePath);
                       
                       // 上传附件
                       const fileContent = fs.readFileSync(tempFilePath);
                       await octokit.repos.uploadReleaseAsset({
-                        owner: '${{ github.repository_owner }}',
-                        repo: '${{ github.event.repository.name }}',
+                        owner: currentOwner,
+                        repo: currentRepo,
                         release_id: newRelease.data.id,
                         name: asset.name,
                         data: fileContent,
-                        headers: {
-                          'content-type': asset.content_type || 'application/octet-stream',
-                          'content-length': asset.size
-                        }
                       });
                       
                       console.log('Uploaded:', asset.name);
-                      
-                      // 清理临时文件
                       fs.unlinkSync(tempFilePath);
+                      
                     } catch (error) {
                       console.error('Failed to sync asset:', asset.name, error.message);
                     }
@@ -127,11 +123,10 @@ jobs:
           }
           
           syncReleases().catch(console.error);
-        "
+          EOF
 
       - name: Cleanup
         run: |
-          # 清理可能的临时文件
           if [ -d "./temp_assets" ]; then
             rm -rf ./temp_assets
           fi
