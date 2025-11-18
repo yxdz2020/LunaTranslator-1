@@ -9,7 +9,7 @@ on:
       upstream_repo:
         description: 'HIllya51/LunaTranslator'
         required: true
-        default: 'original/example-repo'
+        default: 'yxdz2020/LunaTranslator-1'
 
 env:
   UPSTREAM_REPO: ${{ github.event.inputs.upstream_repo || 'original/example-repo' }}
