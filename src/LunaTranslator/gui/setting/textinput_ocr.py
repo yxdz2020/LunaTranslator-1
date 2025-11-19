@@ -1,7 +1,7 @@
 from qtsymbols import *
 import functools, os
 from myutils.config import globalconfig, ocrsetting, ocrerrorfix
-from myutils.utils import splitocrtypes, getimagefilefilter
+from myutils.utils import splitocrtypes, getimagefilefilter, selectdebugfile
 from gui.inputdialog import postconfigdialog, autoinitdialog_items, autoinitdialog
 from gui.usefulwidget import (
     D_getsimplecombobox,
@@ -15,6 +15,7 @@ from gui.usefulwidget import (
     D_getdoclink,
     ClickableLabel,
     getboxlayout,
+    createfoldgrid,
     TableViewW,
     saveposwindow,
     check_grid_append,
@@ -190,6 +191,11 @@ def initgridsources(self, names):
                     globalconfig["ocr"][name].get("argstype", None),
                     globalconfig["ocr"][name]["name"],
                 )
+            )
+        elif name == "selfbuild":
+            _3 = D_getIconButton(
+                callback=lambda: selectdebugfile("selfbuild_ocr.py"),
+                icon="fa.edit",
             )
         elif name in ocrsetting:
             items = autoinitdialog_items(ocrsetting[name])
@@ -423,7 +429,7 @@ class showocrimage(saveposwindow):
 
 
 def internal(self):
-    offline, online = splitocrtypes(globalconfig["ocr"])
+    offline, online, other = splitocrtypes(globalconfig["ocr"], other=True)
     offgrids = initgridsources(self, offline)
     offgrids += [
         [(functools.partial(offlinelinks, "ocr"), 0)],
@@ -443,6 +449,15 @@ def internal(self):
                 type="grid",
                 grid=initgridsources(self, online),
                 button=D_getdoclink("useapis/ocrapi.html#anchor-online"),
+            )
+        ],
+        [
+            functools.partial(
+                createfoldgrid,
+                initgridsources(self, other),
+                "其他",
+                d=globalconfig["foldstatus"]["ocr"],
+                k="other",
             )
         ],
         [
